@@ -1,8 +1,11 @@
+import itertools
+
 import numpy as np
 import warnings
 from scipy import sparse
 from ..utils import get_genomic_distances
 from ..utils import get_intra_mask
+import logging
 
 
 warnings.warn(
@@ -10,7 +13,7 @@ warnings.warn(
     "Use only for testing purposes")
 
 
-def estimate_block_biases(counts, lengths, cnv, verbose=False):
+def estimate_block_biases(counts, lengths, cnv, min_iter=5, max_iter=20, eps=1e-1):
     """
     Estimates block biases
 
@@ -31,35 +34,26 @@ def estimate_block_biases(counts, lengths, cnv, verbose=False):
     """
     if sparse.issparse(counts):
         bias_es = np.ones(counts.data.shape)
-        loci_sums = counts.sum(axis=0).A + counts.sum(axis=1).A
+        # loci_sums = counts.sum(axis=0).A + counts.sum(axis=1).A
     else:
         bias_es = np.ones(counts.shape)
         loci_sums = (counts.sum(axis=0) + counts.sum(axis=1)) == 0
         counts[loci_sums] = np.nan
         counts[:, loci_sums] = np.nan
 
-    print("")
-    print("Estimating CNV-effects.")
-    max_iter = 20
-    min_iter = 5
-    eps = 1e-1
+    logging.info("Estimating CNV-effects.")
     old_bias_es = None
-    for it in range(max_iter):
-        if verbose > 0:
-            print("Iteration %d:" % it)
-
-            print("1. Estimating mapping...")
+    for it in range(1, max_iter + 1):
+        logging.info("Iteration #%d: Estimating mapping...", it)
         mapping = get_mapping(counts, lengths, bias_es, verbose=True)
 
-        if verbose > 0:
-            print("2. Estimating expected...")
+        logging.info("Iteration #%d: Estimating expected...", it)
 
         c_expected = get_expected(counts, lengths, bias_es, mapping=mapping)
         if np.any(c_expected < 0):
             raise ValueError("Found expected counts below 0.")
 
-        if verbose > 0:
-            print("3. Estimating CNV biases...")
+        logging.info("Iteration #%d: Estimating CNV biases...", it)
 
         bias_es = estimate_bias(counts, cnv, c_expected, lengths,
                                 mapping=mapping,
@@ -71,16 +65,14 @@ def estimate_block_biases(counts, lengths, cnv, verbose=False):
         if old_bias_es is not None:
             error = np.nanmax(np.abs(bias_es - old_bias_es))
         if it >= min_iter and old_bias_es is not None and error < eps:
-            if verbose > 0:
-                print("")
-                print("Converged in %d iteration:" % it)
-            break
+            logging.info("Block bias estimation converged in %d iterations", it)
+            return bias_es
         elif old_bias_es is not None:
-            if verbose > 5:
-                print("Error %0.2f" % error)
+            logging.info("Iteration #%d: Error %0.2f", it, error)
 
         old_bias_es = bias_es.copy()
 
+    logging.warning("Stopping at iteration %d. Block bias estimation did not converge!", it)
     return bias_es
 
 
@@ -414,39 +406,38 @@ def _estimate_bias_sparse(counts, cnv, c_expected, lengths, mapping,
         [[missing_loci[0]], missing_loci[1:] - missing_loci[:-1]])
 
     # Start with the inter
-    for cnv_i in np.unique(cnv):
-        for cnv_j in np.unique(cnv):
-            idx = np.where(
-                ((cnv[counts.row] == cnv_i) &
-                 (cnv[counts.col] == cnv_j)) |
-                ((cnv[counts.row] == cnv_j) &
-                 (cnv[counts.col] == cnv_i)))[0]
-            c_intra = intra[idx]
-            if not np.any(np.invert(c_intra)):
-                continue
+    for cnv_i, cnv_j in itertools.product(np.unique(cnv), repeat=2):
+        idx = np.where(
+            ((cnv[counts.row] == cnv_i) &
+             (cnv[counts.col] == cnv_j)) |
+            ((cnv[counts.row] == cnv_j) &
+             (cnv[counts.col] == cnv_i)))[0]
+        c_intra = intra[idx]
+        if not np.any(np.invert(c_intra)):
+            continue
 
-            c = counts.data[idx][np.invert(c_intra)]
-            c_exp = c_expected[idx][np.invert(c_intra)]
+        c = counts.data[idx][np.invert(c_intra)]
+        c_exp = c_expected[idx][np.invert(c_intra)]
 
-            # XXX need to take in account 0 in the denominator.
-            rows = np.array(
-                [i for i in np.where(cnv == cnv_i)[0] if i not in mask_idx])
-            cols = np.array(
-                [i for i in np.where(cnv == cnv_j)[0] if i not in mask_idx])
-            gdis_, num = _num_each_gdis(rows, cols, lengths)
+        # XXX need to take in account 0 in the denominator.
+        rows = np.array(
+            [i for i in np.where(cnv == cnv_i)[0] if i not in mask_idx])
+        cols = np.array(
+            [i for i in np.where(cnv == cnv_j)[0] if i not in mask_idx])
+        gdis_, num = _num_each_gdis(rows, cols, lengths)
 
-            # We are only interested in the inters here
-            denominator = (num[gdis_ == -1] * (mapping[gdis == -1] ** 2)).sum()
-            bias[idx] = (c * c_exp).sum() / denominator
+        # We are only interested in the inters here
+        denominator = (num[gdis_ == -1] * (mapping[gdis == -1] ** 2)).sum()
+        bias[idx] = (c * c_exp).sum() / denominator
 
     bias[intra] = 1
 
     # Now do the intra. For the intra, we have to do piece by piece (XXX check
     # this).
     breakpoints = np.where((cnv[1:] - cnv[:-1]).astype(bool))[0] + 1
-    breakpoints = np.array(list(breakpoints) + list(lengths.cumsum()))
+    breakpoints = np.concatenate([breakpoints, lengths.cumsum()])
     breakpoints = np.unique(breakpoints)
-    breakpoints.sort()
+    # breakpoints.sort()  # Redundant
 
     begin_i = 0
     for i, end_i in enumerate(breakpoints):

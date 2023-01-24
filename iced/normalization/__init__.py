@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 from scipy import sparse
 from ._normalization_ import _update_normalization_csr
@@ -6,7 +8,7 @@ from ._ca_utils import estimate_block_biases
 
 
 def ICE_normalization(X, SS=None, max_iter=3000, eps=1e-4, copy=True,
-                      norm='l1', verbose=0, output_bias=False,
+                      norm='l1',output_bias=False,
                       total_counts=None, counts_profile=None):
     """
     ICE normalization
@@ -67,8 +69,7 @@ def ICE_normalization(X, SS=None, max_iter=3000, eps=1e-4, copy=True,
     old_bias = None
     bias = np.ones((m, 1))
     _is_tri = is_tri(X)
-    if verbose:
-        print("Matrix is triangular superior")
+    logging.debug("Matrix is triangular superior")
 
     if counts_profile is not None:
         rows_to_remove = counts_profile == 0
@@ -83,7 +84,7 @@ def ICE_normalization(X, SS=None, max_iter=3000, eps=1e-4, copy=True,
 
     if total_counts is None:
         total_counts = X.sum()
-    for it in np.arange(max_iter):
+    for it in range(1, max_iter + 1):
         if norm == 'l1':
             # Actually, this should be done if the matrix is diag sup or diag
             # inf
@@ -122,14 +123,18 @@ def ICE_normalization(X, SS=None, max_iter=3000, eps=1e-4, copy=True,
         X *= total_counts / X.sum()
 
         if old_bias is not None and np.abs(old_bias - bias).sum() < eps:
-            if verbose > 1:
-                print("break at iteration %d" % (it,))
             break
 
-        if verbose > 1 and old_bias is not None:
-            print('ICE at iteration %d %s' %
-                  (it, np.abs(old_bias - bias).sum()))
+        if old_bias is not None:
+            logging.info("ICE at iteration %d: %s", it, np.abs(old_bias - bias).sum())
         old_bias = bias.copy()
+
+    if it == max_iter:
+        logging.warning("Stopping at iteration %d. ICE did not converge!", it)
+    else:
+        logging.info("ICE converged at iteration %d", it)
+
+
     # Now that we are finished with the bias estimation, set all biases
     # corresponding to filtered rows to np.nan
     if sparse.issparse(X):
